@@ -53,3 +53,16 @@ describe("JSON-LD reader (our compact projection)", () => {
     expect(readJsonld({ "@context": {} } as never)).toHaveLength(0);
   });
 });
+
+describe("language-keyed maps (concept-browser aggregates)", () => {
+  it("expands { eng, fra } prefLabel maps into lang literals", () => {
+    const doc = {
+      "@context": { skos: "http://www.w3.org/2004/02/skos/core#" },
+      "@graph": [{ "@id": "https://x/1", "skos:prefLabel": { "eng": "quantity", "fra": "grandeur" } }],
+    };
+    const quads = readJsonld(doc as never);
+    expect(quads).toHaveLength(2);
+    expect(quads.some((q) => q.o.kind === "literal" && q.o.lang === "eng" && q.o.value === "quantity")).toBe(true);
+    expect(quads.some((q) => q.o.kind === "literal" && q.o.lang === "fra" && q.o.value === "grandeur")).toBe(true);
+  });
+});
