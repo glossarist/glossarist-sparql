@@ -8,5 +8,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
-  "devDependencies": { "typescript": "^5", "vitest": "^3" }
+  "devDependencies": {
+    "typescript": "^5",
+    "vitest": "^5.1.2"
+  }
 }
