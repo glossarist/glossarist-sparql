@@ -1,15 +1,21 @@
 {
   "name": "glossarist-sparql",
   "version": "0.1.0",
-  "description": "Roll-our-own SPARQL engine for glossarist data — quadstore, JSON-LD reader, SPARQL subset. Zero dependencies.",
+  "description": "Roll-our-own SPARQL engine for glossarist data \u2014 quadstore, JSON-LD reader, SPARQL subset. Zero dependencies.",
   "type": "module",
-  "main": "src/index.ts",
+  "main": "dist/index.js",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "devDependencies": {
     "typescript": "^5",
     "vitest": "^5.1.2"
-  }
+  },
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ]
 }
