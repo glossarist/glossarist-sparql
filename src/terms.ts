@@ -29,3 +29,8 @@ export function termKey(t: Term): string {
 }
 
 export type Quad = { s: Term; p: Term; o: Term };
+
+export type Var = { kind: "var"; name: string };
+export type PatternTerm = Term | Var;
+export type TriplePattern = { s: PatternTerm; p: PatternTerm; o: PatternTerm };
+export function isVar(t: PatternTerm): t is Var { return (t as Var).kind === "var"; }
