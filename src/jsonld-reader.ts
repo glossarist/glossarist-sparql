@@ -42,23 +42,32 @@ function termFromId(id: string, context: Record<string, string>): Term {
   return iri(expandTerm(id, context));
 }
 
-function valueToTerm(value: unknown, context: Record<string, string>): Term | null {
-  if (typeof value === "string") return literal(value);
-  if (value === null || value === undefined) return null;
-  if (typeof value !== "object") return literal(String(value));
+function valueToTerms(value: unknown, context: Record<string, string>): Term[] {
+  if (typeof value === "string") return [literal(value)];
+  if (value === null || value === undefined) return [];
+  if (typeof value !== "object") return [literal(String(value))];
+  if (Array.isArray(value)) return value.flatMap((v) => valueToTerms(v, context));
   const v = value as Record<string, unknown>;
   if ("@id" in v) {
     const id = String(v["@id"]);
-    return id.startsWith(BNODE_PREFIX) ? blank(id.slice(BNODE_PREFIX.length)) : iri(expandTerm(id, context));
+    return [id.startsWith(BNODE_PREFIX) ? blank(id.slice(BNODE_PREFIX.length)) : iri(expandTerm(id, context))];
   }
   if ("@value" in v) {
     const text = String(v["@value"]);
-    if (typeof v["@language"] === "string") return literal(text, { lang: v["@language"] });
+    if (typeof v["@language"] === "string") return [literal(text, { lang: v["@language"] })];
     const datatype = typeof v["@type"] === "string" ? expandTerm(v["@type"], context) : undefined;
-    if (datatype && datatype !== XSD_STRING) return literal(text, { datatype });
-    return literal(text);
+    if (datatype && datatype !== XSD_STRING) return [literal(text, { datatype })];
+    return [literal(text)];
   }
-  return null; // nested node objects never occur in our projection
+  // Language-keyed map: { "eng": "quantity", "fra": "grandeur" } — the form
+  // concept-browser aggregates emit for prefLabel/definition/scopeNote.
+  const entries = Object.entries(v);
+  if (entries.length > 0 && entries.every(([, val]) => val === null || typeof val === "string")) {
+    return entries
+      .filter(([, val]) => val !== null)
+      .map(([lang, val]) => literal(String(val), { lang: lang.toLowerCase() }));
+  }
+  return []; // nested node objects are not part of our projections (v0)
 }
 
 /** Parse a compact JSON-LD document (our projection) into quads. */
@@ -79,11 +88,13 @@ export function readJsonld(doc: Doc): Quad[] {
         : iri(expandTerm(key, context));
       const values = Array.isArray(raw) ? raw : [raw];
       for (const value of values) {
-        const object = key === "@type"
-          ? (typeof value === "string" ? iri(expandTerm(value, context)) : null)
-          : valueToTerm(value, context);
-        if (!object) continue;
-        quads.push({ s: subject, p: predicate, o: object });
+        if (key === "@type") {
+          if (typeof value === "string") quads.push({ s: subject, p: iri(RDF_TYPE), o: iri(expandTerm(value, context)) });
+          continue;
+        }
+        for (const object of valueToTerms(value, context)) {
+          quads.push({ s: subject, p: predicate, o: object });
+        }
       }
     }
   }
