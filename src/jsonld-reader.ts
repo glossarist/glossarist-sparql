@@ -15,9 +15,14 @@ type Doc = { "@context"?: Record<string, string>; "@graph"?: Node[] } & Node;
 
 const RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const BNODE_PREFIX = "_:";
+// Known absolute-IRI schemes only — a bare word before ':' ("gloss:Concept")
+// is a CURIE, not a scheme (same allowlist as glossarist-js curie.ts).
+const ABSOLUTE_SCHEMES = new Set(["http", "https", "urn", "file", "mailto", "ftp", "doi"]);
 
 function isAbsolute(value: string): boolean {
-  return /^[a-z][a-z0-9+.-]*:/i.test(value) && !value.startsWith(BNODE_PREFIX);
+  if (value.startsWith(BNODE_PREFIX)) return false;
+  const colon = value.indexOf(":");
+  return colon > 0 && ABSOLUTE_SCHEMES.has(value.slice(0, colon).toLowerCase());
 }
 
 function expandTerm(value: string, context: Record<string, string>): string {
