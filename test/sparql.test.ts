@@ -110,4 +110,24 @@ describe("SPARQL v0 end-to-end", () => {
       evaluate(store, q2 as never, { deadlineMs: Date.now() - 1 });
     }).rejects.toThrow();
   });
+
+  it("FILTER >= and <= comparisons", () => {
+    const q = parseQuery(`SELECT ?a WHERE { ?a <http://p> ?o . FILTER (?o >= "2") }`);
+    const st = new QuadStore();
+    st.insert({ s: { kind: "iri", value: "x:1" }, p: { kind: "iri", value: "http://p" }, o: { kind: "literal", value: "1" } });
+    st.insert({ s: { kind: "iri", value: "x:2" }, p: { kind: "iri", value: "http://p" }, o: { kind: "literal", value: "2" } });
+    st.insert({ s: { kind: "iri", value: "x:3" }, p: { kind: "iri", value: "http://p" }, o: { kind: "literal", value: "3" } });
+    const r = evaluate(st, q as never) as { bindings: { a: { value: string } }[] };
+    expect(r.bindings.map((b) => b.a.value).sort()).toEqual(["x:2", "x:3"]);
+  });
+
+  it("FILTER !bound(?v) over OPTIONAL", () => {
+    const q = parseQuery(`SELECT ?a WHERE { ?a <http://p> ?o . OPTIONAL { ?a <http://q> ?q } FILTER (!bound(?q)) }`);
+    const st = new QuadStore();
+    st.insert({ s: { kind: "iri", value: "x:1" }, p: { kind: "iri", value: "http://p" }, o: { kind: "literal", value: "1" } });
+    st.insert({ s: { kind: "iri", value: "x:2" }, p: { kind: "iri", value: "http://p" }, o: { kind: "literal", value: "2" } });
+    st.insert({ s: { kind: "iri", value: "x:2" }, p: { kind: "iri", value: "http://q" }, o: { kind: "literal", value: "q" } });
+    const r = evaluate(st, q as never) as { bindings: { a: { value: string } }[] };
+    expect(r.bindings.map((b) => b.a.value)).toEqual(["x:1"]);
+  });
 });

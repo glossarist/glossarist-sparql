@@ -11,7 +11,7 @@ export class SparqlSyntaxError extends Error {}
 export type Expr =
   | { type: "or" | "and"; left: Expr; right: Expr }
   | { type: "not"; inner: Expr }
-  | { type: "compare"; op: "=" | "!=" | "<" | ">"; left: Expr; right: Expr }
+  | { type: "compare"; op: "=" | "!=" | "<" | ">" | "<=" | ">="; left: Expr; right: Expr }
   | { type: "call"; name: "regex" | "lang" | "datatype" | "bound" | "str"; args: Expr[] }
   | { type: "term"; term: PatternTerm };
 
@@ -258,7 +258,7 @@ function parseBuiltIn(st: St): Expr {
 function parsePrimary(st: St): Expr {
   const t = peek(st)!;
   if (t.kind === "punct" && t.text === "(") return parseBracketted(st);
-  if (t.kind === "kw" && t.text === "!") { next(st); return { type: "not", inner: parsePrimary(st) }; }
+  if (t.kind === "punct" && t.text === "!") { next(st); return { type: "not", inner: parsePrimary(st) }; }
   if (t.kind === "kw" && BUILTINS.has(t.text.toUpperCase())) return parseBuiltIn(st);
   next(st);
   return { type: "term", term: patternTermToken(st, t) };
@@ -269,8 +269,8 @@ function parseCompare(st: St): Expr {
   for (;;) {
     const t = peek(st);
     if (t?.kind === "punct" && ["=", "!="].includes(t.text)) { next(st); left = { type: "compare", op: t.text as "=" | "!=", left, right: parsePrimary(st) }; continue; }
-    if (t?.kind === "punct" && t.text === "<" && !(st.toks[st.i + 1]?.kind === "iri")) { next(st); left = { type: "compare", op: "<", left, right: parsePrimary(st) }; continue; }
-    if (t?.kind === "punct" && t.text === ">") { next(st); left = { type: "compare", op: ">", left, right: parsePrimary(st) }; continue; }
+    if (t?.kind === "punct" && (t.text === "<" || t.text === "<=") && !(st.toks[st.i + 1]?.kind === "iri")) { next(st); left = { type: "compare", op: t.text as "<" | "<=", left, right: parsePrimary(st) }; continue; }
+    if (t?.kind === "punct" && (t.text === ">" || t.text === ">=")) { next(st); left = { type: "compare", op: t.text as ">" | ">=", left, right: parsePrimary(st) }; continue; }
     break;
   }
   return left;
