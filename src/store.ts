@@ -41,10 +41,15 @@ export class QuadStore {
     else m.set(k, [q]);
   }
 
-  /** Match by binding pattern; use index when at least two terms bound. */
+  /** Match by binding pattern; use index when at least two terms bound.
+   * All bound terms are honored — the third term is filtered after the
+   * two-key index lookup (a fully-bound match is an existence check). */
   match(s?: Term, p?: Term, o?: Term): Quad[] {
     const sk = s && termKey(s), pk = p && termKey(p), ok = o && termKey(o);
-    if (sk && pk) return this.spo.get(`${sk}|${pk}`) ?? [];
+    if (sk && pk) {
+      const quads = this.spo.get(`${sk}|${pk}`) ?? [];
+      return ok ? quads.filter((q) => termKey(q.o) === ok) : quads;
+    }
     if (pk && ok) return this.pos.get(`${pk}|${ok}`) ?? [];
     if (ok && sk) return this.osp.get(`${ok}|${sk}`) ?? [];
     if (sk) return this.all.filter((q) => termKey(q.s) === sk);

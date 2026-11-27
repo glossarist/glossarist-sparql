@@ -238,3 +238,88 @@ describe("SPARQL BIND", () => {
     expect((r.bindings[0].c as { value: string }).value).toBe(`${CONCEPT}3`);
   });
 });
+
+describe("SPARQL MINUS", () => {
+  const store = makeStore();
+
+  it("MINUS removes solutions compatible on the shared domain", () => {
+    const q = parseQuery(`
+      SELECT ?c WHERE {
+        ?c a gloss:Concept .
+        MINUS { ?c gloss:status "superseded" . }
+      }`);
+    const r = evaluate(store, q as never) as { bindings: Record<string, Term>[] };
+    expect(r.bindings).toHaveLength(2); // superseded concept 2 removed
+    const ids = r.bindings.map((b) => (b.c as { value: string }).value).sort();
+    expect(ids).toEqual([`${CONCEPT}1`, `${CONCEPT}3`]);
+  });
+
+  it("MINUS with a disjoint domain removes nothing (SPARQL 1.1 compat rule)", () => {
+    const q = parseQuery(`
+      SELECT ?c WHERE {
+        ?c a gloss:Concept .
+        MINUS { ?d gloss:status "superseded" . }
+      }`);
+    const r = evaluate(store, q as never) as { bindings: Record<string, Term>[] };
+    expect(r.bindings).toHaveLength(3); // no shared variables → nothing removed
+  });
+
+  it("MINUS is evaluated independently of outer bindings", () => {
+    const q = parseQuery(`
+      SELECT ?c ?label WHERE {
+        ?c gloss:identifier "3.1" .
+        ?c skos:prefLabel ?label .
+        MINUS { ?x gloss:status "superseded" . }
+      }`);
+    const r = evaluate(store, q as never) as { bindings: Record<string, Term>[] };
+    expect(r.bindings).toHaveLength(2); // the MINUS branch matches on its own; disjoint ?x keeps all rows
+  });
+});
+
+describe("SPARQL EXISTS / NOT EXISTS", () => {
+  const store = makeStore();
+
+  it("EXISTS keeps solutions where the pattern matches with the row substituted", () => {
+    const q = parseQuery(`
+      SELECT ?c WHERE {
+        ?c a gloss:Concept .
+        FILTER (EXISTS { ?c gloss:status ?s . })
+      }`);
+    const r = evaluate(store, q as never) as { bindings: Record<string, Term>[] };
+    const ids = r.bindings.map((b) => (b.c as { value: string }).value).sort();
+    expect(ids).toEqual([`${CONCEPT}1`, `${CONCEPT}2`]); // concept 3 has no status
+  });
+
+  it("NOT EXISTS is the complement (classic anti-join)", () => {
+    const q = parseQuery(`
+      SELECT ?c WHERE {
+        ?c a gloss:Concept .
+        FILTER (NOT EXISTS { ?c gloss:status ?s . })
+      }`);
+    const r = evaluate(store, q as never) as { bindings: Record<string, Term>[] };
+    expect(r.bindings).toHaveLength(1);
+    expect((r.bindings[0].c as { value: string }).value).toBe(`${CONCEPT}3`);
+  });
+
+  it("EXISTS works as a bare FILTER constraint (no parentheses)", () => {
+    const q = parseQuery(`
+      SELECT ?c WHERE {
+        ?c a gloss:Concept .
+        FILTER EXISTS { ?c gloss:status "valid" . }
+      }`);
+    const r = evaluate(store, q as never) as { bindings: Record<string, Term>[] };
+    expect(r.bindings).toHaveLength(1);
+    expect((r.bindings[0].c as { value: string }).value).toBe(`${CONCEPT}1`);
+  });
+
+  it("EXISTS composes inside boolean expressions", () => {
+    const q = parseQuery(`
+      SELECT ?c WHERE {
+        ?c skos:prefLabel ?label .
+        FILTER (lang(?label) = "eng" && NOT EXISTS { ?c gloss:status "superseded" . })
+      }`);
+    const r = evaluate(store, q as never) as { bindings: Record<string, Term>[] };
+    expect(r.bindings).toHaveLength(1); // only concept 1 has an eng label and is not superseded
+    expect((r.bindings[0].c as { value: string }).value).toBe(`${CONCEPT}1`);
+  });
+});

@@ -14,6 +14,7 @@ export type Expr =
   | { type: "not"; inner: Expr }
   | { type: "compare"; op: "=" | "!=" | "<" | ">" | "<=" | ">="; left: Expr; right: Expr }
   | { type: "call"; name: "regex" | "lang" | "datatype" | "bound" | "str"; args: Expr[] }
+  | { type: "exists"; pattern: Group; negated: boolean }
   | { type: "term"; term: PatternTerm };
 
 export type Query =
@@ -29,6 +30,7 @@ export type GroupElement =
   | { type: "values"; bindings: Record<string, Term | null>[] }
   | { type: "subselect"; query: SelectQuery }
   | { type: "bind"; expr: Expr; name: string }
+  | { type: "minus"; group: Group }
   | { type: "filter"; expr: Expr };
 export type Group = GroupElement[];
 
@@ -182,6 +184,11 @@ function parseGroup(st: St): Group {
       group.push({ type: "optional", group: parseGroup(st) });
       continue;
     }
+    if (t.kind === "kw" && t.text === "MINUS") {
+      next(st);
+      group.push({ type: "minus", group: parseGroup(st) });
+      continue;
+    }
     if (t.kind === "kw" && t.text === "BIND") {
       next(st);
       punct(st, "(");
@@ -259,8 +266,14 @@ const BUILTINS = new Set(["REGEX", "LANG", "DATATYPE", "BOUND", "STR"]);
 function parseConstraint(st: St): Expr {
   const t = peek(st)!;
   if (t.kind === "punct" && t.text === "(") return parseBracketted(st);
+  if (t.kind === "kw" && t.text === "EXISTS") { next(st); return parseExists(st, false); }
+  if (t.kind === "kw" && t.text === "NOT") { next(st); eatKw(st, "EXISTS"); return parseExists(st, true); }
   if (t.kind === "kw" && BUILTINS.has(t.text.toUpperCase())) return parseBuiltIn(st);
   throw new SparqlSyntaxError(`expected constraint, got ${t.text}`);
+}
+
+function parseExists(st: St, negated: boolean): Expr {
+  return { type: "exists", pattern: parseGroup(st), negated };
 }
 
 function parseBracketted(st: St): Expr {
@@ -283,6 +296,8 @@ function parsePrimary(st: St): Expr {
   const t = peek(st)!;
   if (t.kind === "punct" && t.text === "(") return parseBracketted(st);
   if (t.kind === "punct" && t.text === "!") { next(st); return { type: "not", inner: parsePrimary(st) }; }
+  if (t.kind === "kw" && t.text === "EXISTS") { next(st); return parseExists(st, false); }
+  if (t.kind === "kw" && t.text === "NOT") { next(st); eatKw(st, "EXISTS"); return parseExists(st, true); }
   if (t.kind === "kw" && BUILTINS.has(t.text.toUpperCase())) return parseBuiltIn(st);
   next(st);
   return { type: "term", term: patternTermToken(st, t) };

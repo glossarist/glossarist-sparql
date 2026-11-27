@@ -84,6 +84,17 @@ function projectSolutions(solutions: Solution[], vars: string[] | null): Solutio
   });
 }
 
+/** SPARQL 1.1 set difference: μ survives iff no μ' in the right side is both
+ * compatible with μ and shares at least one domain variable with μ. */
+function evalMinus(left: Solution[], right: Solution[]): Solution[] {
+  return left.filter((mu) => !right.some((mu2) => sharesDomain(mu, mu2) && compatible(mu, mu2)));
+}
+
+function sharesDomain(a: Solution, b: Solution): boolean {
+  for (const k of Object.keys(a)) if (b[k] !== undefined) return true;
+  return false;
+}
+
 function evalBgp(store: { match(s?: Term, p?: Term, o?: Term): Quad[] }, triples: TriplePattern[], input: Solution[], ctx: EvalCtx): Solution[] {
   let solutions = input;
   for (const tp of triples) {
@@ -138,11 +149,18 @@ function evalGroup(group: Group, store: { match(s?: Term, p?: Term, o?: Term): Q
       const next: Solution[] = [];
       for (const solution of solutions) {
         let value: Term | null = null;
-        try { value = evalExpr(element.expr, solution); } catch { value = null; } // expression error → variable stays unbound
+        try { value = evalExpr(element.expr, solution, store, ctx); } catch { value = null; } // expression error → variable stays unbound
         next.push(value ? { ...solution, [element.name]: value } : solution);
         ctx.check(next.length);
       }
       solutions = next;
+      continue;
+    }
+    if (element.type === "minus") {
+      // MINUS is evaluated bottom-up (independently of the outer bindings),
+      // then subtracted per the SPARQL 1.1 compatibility rules.
+      const right = evalGroup(element.group, store, [{}], ctx);
+      solutions = evalMinus(solutions, right);
       continue;
     }
     if (element.type === "union") {
@@ -169,44 +187,52 @@ function evalGroup(group: Group, store: { match(s?: Term, p?: Term, o?: Term): Q
   }
   // filters apply at group end, over the group's final solutions
   if (filters.length > 0 && solutions.length > 0) {
-    solutions = solutions.filter((solution) => filters.every((f) => effectiveBoolean(evalExpr(f, solution))));
+    solutions = solutions.filter((solution) => filters.every((f) => effectiveBoolean(evalExpr(f, solution, store, ctx))));
     ctx.check(solutions.length);
   }
   return solutions;
 }
 
-function evalExpr(expr: Expr, solution: Solution): Term | null {
+function evalExpr(expr: Expr, solution: Solution, store: { match(s?: Term, p?: Term, o?: Term): Quad[] }, ctx: EvalCtx): Term | null {
   switch (expr.type) {
     case "term": {
       if (isVar(expr.term)) return solution[expr.term.name] ?? null;
       return expr.term;
     }
-    case "not": return effectiveBoolean(evalExpr(expr.inner, solution)) ? null : literal("true", { datatype: "http://www.w3.org/2001/XMLSchema#boolean" });
+    case "not": return effectiveBoolean(evalExpr(expr.inner, solution, store, ctx)) ? null : literal("true", { datatype: "http://www.w3.org/2001/XMLSchema#boolean" });
     case "and": {
-      const l = effectiveBoolean(evalExpr(expr.left, solution));
+      const l = effectiveBoolean(evalExpr(expr.left, solution, store, ctx));
       // error semantics simplified: false dominates
       if (l === false) return literal("false", { datatype: "http://www.w3.org/2001/XMLSchema#boolean" });
-      const r = effectiveBoolean(evalExpr(expr.right, solution));
+      const r = effectiveBoolean(evalExpr(expr.right, solution, store, ctx));
       if (r === false) return literal("false", { datatype: "http://www.w3.org/2001/XMLSchema#boolean" });
       if (l === true && r === true) return literal("true", { datatype: "http://www.w3.org/2001/XMLSchema#boolean" });
       return null;
     }
     case "or": {
-      const l = effectiveBoolean(evalExpr(expr.left, solution));
+      const l = effectiveBoolean(evalExpr(expr.left, solution, store, ctx));
       if (l === true) return literal("true", { datatype: "http://www.w3.org/2001/XMLSchema#boolean" });
-      const r = effectiveBoolean(evalExpr(expr.right, solution));
+      const r = effectiveBoolean(evalExpr(expr.right, solution, store, ctx));
       if (r === true) return literal("true", { datatype: "http://www.w3.org/2001/XMLSchema#boolean" });
       if (l === false && r === false) return literal("false", { datatype: "http://www.w3.org/2001/XMLSchema#boolean" });
       return null;
     }
     case "compare": {
-      const l = evalExpr(expr.left, solution);
-      const r = evalExpr(expr.right, solution);
+      const l = evalExpr(expr.left, solution, store, ctx);
+      const r = evalExpr(expr.right, solution, store, ctx);
       if (!l || !r) return null;
       const cmp = compareTerms(l, r);
       if (cmp === null) return null;
       const ok = expr.op === "=" ? cmp === 0 : expr.op === "!=" ? cmp !== 0 : expr.op === "<" ? cmp < 0 : expr.op === "<=" ? cmp <= 0 : expr.op === ">" ? cmp > 0 : cmp >= 0;
       return ok ? literal("true", { datatype: "http://www.w3.org/2001/XMLSchema#boolean" }) : literal("false", { datatype: "http://www.w3.org/2001/XMLSchema#boolean" });
+    }
+    case "exists": {
+      // Evaluate the pattern against the store with the current solution
+      // substituted in; the row is kept iff the pattern matches (negated for
+      // NOT EXISTS). Inner variables are scoped to the EXISTS pattern.
+      const found = evalGroup(expr.pattern, store, [solution], ctx).length > 0;
+      const truth = found !== expr.negated;
+      return truth ? literal("true", { datatype: "http://www.w3.org/2001/XMLSchema#boolean" }) : literal("false", { datatype: "http://www.w3.org/2001/XMLSchema#boolean" });
     }
     case "call": {
       switch (expr.name) {
@@ -216,30 +242,30 @@ function evalExpr(expr: Expr, solution: Solution): Term | null {
           return solution[arg.term.name] !== undefined ? literal("true", { datatype: "http://www.w3.org/2001/XMLSchema#boolean" }) : literal("false", { datatype: "http://www.w3.org/2001/XMLSchema#boolean" });
         }
         case "lang": {
-          const t = evalExpr(expr.args[0], solution);
+          const t = evalExpr(expr.args[0], solution, store, ctx);
           if (!t || t.kind !== "literal") return null;
           return literal(t.lang ?? "");
         }
         case "datatype": {
-          const t = evalExpr(expr.args[0], solution);
+          const t = evalExpr(expr.args[0], solution, store, ctx);
           if (!t || t.kind !== "literal") return null;
           const XSD = "http://www.w3.org/2001/XMLSchema#";
           const RL = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
           return iri(t.lang ? RL : (t.datatype ?? `${XSD}string`));
         }
         case "str": {
-          const t = evalExpr(expr.args[0], solution);
+          const t = evalExpr(expr.args[0], solution, store, ctx);
           if (!t) return null;
           if (t.kind === "literal") return literal(t.value);
           if (t.kind === "iri") return literal(t.value);
           return null;
         }
         case "regex": {
-          const text = evalExpr(expr.args[0], solution);
-          const pattern = evalExpr(expr.args[1], solution);
+          const text = evalExpr(expr.args[0], solution, store, ctx);
+          const pattern = evalExpr(expr.args[1], solution, store, ctx);
           if (!text || !pattern || text.kind !== "literal" || pattern.kind !== "literal") return null;
           if (pattern.value.length > 256) throw new Error("regex pattern too long"); // ReDoS surface guard
-          const flags = expr.args[2] ? (evalExpr(expr.args[2], solution) as Term | null)?.value ?? "" : "";
+          const flags = expr.args[2] ? (evalExpr(expr.args[2], solution, store, ctx) as Term | null)?.value ?? "" : "";
           if (!/^[imsux]*$/.test(flags)) throw new Error("unsupported regex flags");
           return new RegExp(pattern.value, flags).test(text.value)
             ? literal("true", { datatype: "http://www.w3.org/2001/XMLSchema#boolean" })
