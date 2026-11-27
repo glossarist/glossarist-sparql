@@ -142,7 +142,7 @@ function evalExpr(expr: Expr, solution: Solution): Term | null {
       if (!l || !r) return null;
       const cmp = compareTerms(l, r);
       if (cmp === null) return null;
-      const ok = expr.op === "=" ? cmp === 0 : expr.op === "!=" ? cmp !== 0 : expr.op === "<" ? cmp < 0 : cmp > 0;
+      const ok = expr.op === "=" ? cmp === 0 : expr.op === "!=" ? cmp !== 0 : expr.op === "<" ? cmp < 0 : expr.op === "<=" ? cmp <= 0 : expr.op === ">" ? cmp > 0 : cmp >= 0;
       return ok ? literal("true", { datatype: "http://www.w3.org/2001/XMLSchema#boolean" }) : literal("false", { datatype: "http://www.w3.org/2001/XMLSchema#boolean" });
     }
     case "call": {
