@@ -1,6 +1,6 @@
 {
   "name": "glossarist-sparql",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Roll-our-own SPARQL engine for glossarist data \u2014 quadstore, JSON-LD reader, SPARQL subset. Zero dependencies.",
   "type": "module",
   "main": "dist/index.js",
@@ -18,5 +18,9 @@
   "types": "dist/index.d.ts",
   "files": [
     "dist"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/glossarist/glossarist-sparql.git"
+  }
 }
