@@ -1,7 +1,7 @@
 // SPARQL v0 evaluator over the QuadStore.
 // Solutions = var→Term bindings. Filters apply at group end (proper scoping).
 // Guards: wall-clock deadline + query cost ceiling (solution blow-up cap).
-import type { Query, Group, Expr } from "./sparql-parser.js";
+import type { Query, SelectQuery, Group, Expr } from "./sparql-parser.js";
 import { isVar, termKey, literal, iri, type Term, type PatternTerm, type TriplePattern, type Quad } from "./terms.js";
 
 export class SparqlTimeoutError extends Error {}
@@ -37,6 +37,51 @@ function compatible(a: Solution, b: Record<string, Term | null>): boolean {
 
 function merge(a: Solution, b: Solution): Solution {
   return { ...a, ...b };
+}
+
+/** SPARQL join: merge solution pairs whose shared variables agree.
+ * Hash join over the common variable names; solutions with an unbound shared
+ * variable are compatible with everything, so they bypass the bucket lookup
+ * (inner) or match all buckets (outer). */
+function hashJoin(outer: Solution[], inner: Solution[], ctx: EvalCtx): Solution[] {
+  if (outer.length === 0 || inner.length === 0) return [];
+  const outerVars = new Set<string>(), innerVars = new Set<string>();
+  for (const s of outer) for (const k of Object.keys(s)) outerVars.add(k);
+  for (const s of inner) for (const k of Object.keys(s)) innerVars.add(k);
+  const shared = [...innerVars].filter((v) => outerVars.has(v));
+  const out: Solution[] = [];
+  if (shared.length === 0) {
+    for (const a of outer) for (const b of inner) { out.push(merge(a, b)); ctx.check(out.length); }
+    return out;
+  }
+  const buckets = new Map<string, Solution[]>();
+  const wildcards: Solution[] = [];
+  for (const b of inner) {
+    const parts: string[] = [];
+    let fullyBound = true;
+    for (const v of shared) { const t = b[v]; if (t === undefined) { fullyBound = false; break; } parts.push(termKey(t)); }
+    if (fullyBound) { const k = parts.join("|"); const arr = buckets.get(k); if (arr) arr.push(b); else buckets.set(k, [b]); }
+    else wildcards.push(b);
+  }
+  for (const a of outer) {
+    const parts: string[] = [];
+    let fullyBound = true;
+    for (const v of shared) { const t = a[v]; if (t === undefined) { fullyBound = false; break; } parts.push(termKey(t)); }
+    const matches = fullyBound ? buckets.get(parts.join("|")) ?? [] : inner; // unbound outer var joins with everything
+    for (const b of matches) { out.push(merge(a, b)); ctx.check(out.length); }
+    for (const b of wildcards) { out.push(merge(a, b)); ctx.check(out.length); }
+  }
+  return out;
+}
+
+/** Restrict each solution to the projected variables (subquery visibility). */
+function projectSolutions(solutions: Solution[], vars: string[] | null): Solution[] {
+  if (!vars) return solutions;
+  return solutions.map((solution) => {
+    const projected: Solution = {};
+    for (const v of vars) { const t = solution[v]; if (t !== undefined) projected[v] = t; }
+    return projected;
+  });
 }
 
 function evalBgp(store: { match(s?: Term, p?: Term, o?: Term): Quad[] }, triples: TriplePattern[], input: Solution[], ctx: EvalCtx): Solution[] {
@@ -77,6 +122,24 @@ function evalGroup(group: Group, store: { match(s?: Term, p?: Term, o?: Term): Q
         const extended = evalGroup(inner, store, [solution], ctx);
         if (extended.length > 0) next.push(...extended);
         else next.push(solution);
+        ctx.check(next.length);
+      }
+      solutions = next;
+      continue;
+    }
+    if (element.type === "subselect") {
+      // A subquery is evaluated bottom-up against the store with the outer
+      // deadline and cost ceiling, then hash-joined on the shared variables.
+      const inner = evalSelectPipeline(element.query, store, ctx);
+      solutions = hashJoin(solutions, projectSolutions(inner.solutions, element.query.vars), ctx);
+      continue;
+    }
+    if (element.type === "bind") {
+      const next: Solution[] = [];
+      for (const solution of solutions) {
+        let value: Term | null = null;
+        try { value = evalExpr(element.expr, solution); } catch { value = null; } // expression error → variable stays unbound
+        next.push(value ? { ...solution, [element.name]: value } : solution);
         ctx.check(next.length);
       }
       solutions = next;
@@ -222,6 +285,44 @@ function effectiveBoolean(term: Term | null): boolean | null {
   return null; // type error
 }
 
+/** Full select pipeline: WHERE group, then ORDER BY, DISTINCT, OFFSET, LIMIT.
+ * Used by the top-level SELECT form and by in-group subqueries. */
+function evalSelectPipeline(query: SelectQuery, store: { match(s?: Term, p?: Term, o?: Term): Quad[] }, ctx: EvalCtx): { solutions: Solution[]; allVars: string[] } {
+  let solutions = evalGroup(query.where, store, [{}], ctx);
+  const allVars = collectVars(query.where);
+  const vars = query.vars ?? allVars;
+
+  if (query.order.length > 0) {
+    solutions = [...solutions].sort((a, b) => {
+      for (const { name, desc } of query.order) {
+        const ta = a[name], tb = b[name];
+        if (ta === undefined && tb === undefined) continue;
+        if (ta === undefined) return 1; // unbound sorts last
+        if (tb === undefined) return -1;
+        const cmp = compareTerms(ta, tb) ?? compareStrings(termKey(ta), termKey(tb));
+        if (cmp !== 0) return desc ? -cmp : cmp;
+      }
+      return 0;
+    });
+  }
+
+  if (query.distinct) {
+    const distinctKeys = new Set<string>();
+    const deduped: Solution[] = [];
+    for (const solution of solutions) {
+      const key = vars.map((v) => (solution[v] ? termKey(solution[v]) : "")).join("|");
+      if (distinctKeys.has(key)) continue;
+      distinctKeys.add(key);
+      deduped.push(solution);
+    }
+    solutions = deduped;
+  }
+
+  if (query.offset > 0) solutions = solutions.slice(query.offset);
+  if (query.limit !== null) solutions = solutions.slice(0, query.limit);
+  return { solutions, allVars };
+}
+
 // ---- public entry ----------------------------------------------------------
 
 export interface SelectResult { vars: string[]; bindings: Solution[] }
@@ -257,39 +358,8 @@ export function evaluate(store: { match(s?: Term, p?: Term, o?: Term): Quad[]; s
     return { quads };
   }
 
-  let solutions = evalGroup(query.where, store, input, ctx);
-  const allVars = collectVars(query.where);
+  const { solutions, allVars } = evalSelectPipeline(query, store, ctx);
   const vars = query.vars ?? allVars;
-
-  if (query.order.length > 0) {
-    solutions = [...solutions].sort((a, b) => {
-      for (const { name, desc } of query.order) {
-        const ta = a[name], tb = b[name];
-        if (ta === undefined && tb === undefined) continue;
-        if (ta === undefined) return 1; // unbound sorts last
-        if (tb === undefined) return -1;
-        const cmp = compareTerms(ta, tb) ?? compareStrings(termKey(ta), termKey(tb));
-        if (cmp !== 0) return desc ? -cmp : cmp;
-      }
-      return 0;
-    });
-  }
-
-  let distinctKeys: Set<string> | null = null;
-  if (query.distinct) {
-    distinctKeys = new Set();
-    const deduped: Solution[] = [];
-    for (const solution of solutions) {
-      const key = vars.map((v) => (solution[v] ? termKey(solution[v]) : "")).join("|");
-      if (distinctKeys.has(key)) continue;
-      distinctKeys.add(key);
-      deduped.push(solution);
-    }
-    solutions = deduped;
-  }
-
-  if (query.offset > 0) solutions = solutions.slice(query.offset);
-  if (query.limit !== null) solutions = solutions.slice(0, query.limit);
 
   return {
     vars: vars === null ? allVars : vars.filter((v) => allVars.includes(v)),
@@ -307,6 +377,11 @@ function collectVars(group: Group): string[] {
       if (el.type === "optional") walk(el.group);
       if (el.type === "union") for (const g of el.groups) walk(g);
       if (el.type === "values") for (const b of el.bindings) for (const k of Object.keys(b)) out.add(k);
+      if (el.type === "subselect") {
+        // only the projected variables of a subquery are in scope outside it
+        if (el.query.vars) for (const v of el.query.vars) out.add(v);
+        else walk(el.query.where);
+      }
     }
   };
   walk(group);
