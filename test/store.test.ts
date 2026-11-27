@@ -29,4 +29,12 @@ describe("QuadStore", () => {
     expect(st.match(undefined, type, cls)).toHaveLength(2);
     expect(st.match()).toHaveLength(3);
   });
+  it("fully-bound match honors all three terms (regression: SPO index ignored the object)", () => {
+    const st = new QuadStore();
+    st.insert({ s, p: label, o: literal("valid") });
+    st.insert({ s, p: label, o: literal("superseded") });
+    expect(st.match(s, label, literal("valid"))).toHaveLength(1);
+    expect(st.match(s, label, literal("superseded"))).toHaveLength(1);
+    expect(st.match(s, label, literal("absent"))).toHaveLength(0);
+  });
 });
