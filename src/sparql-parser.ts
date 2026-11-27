@@ -1,8 +1,9 @@
 // SPARQL v0 subset: tokenizer -> recursive-descent parser -> AST.
 // SELECT (DISTINCT) / ASK / CONSTRUCT; BGPs (a, prefixed names, literals);
 // OPTIONAL; UNION; VALUES; FILTER (comparisons, regex/lang/datatype/bound,
-// &&, ||, !); ORDER BY / LIMIT / OFFSET; PREFIX / BASE.
-// Deliberately out of scope v0: property paths, subqueries, aggregates,
+// &&, ||, !); ORDER BY / LIMIT / OFFSET; PREFIX / BASE; subqueries;
+// BIND(expr AS ?var).
+// Deliberately out of scope v0: property paths, aggregates,
 // named graphs, SERVICE, UPDATE.
 import { iri, blank, literal, isVar, type Term, type PatternTerm, type TriplePattern } from "./terms.js";
 
@@ -15,20 +16,23 @@ export type Expr =
   | { type: "call"; name: "regex" | "lang" | "datatype" | "bound" | "str"; args: Expr[] }
   | { type: "term"; term: PatternTerm };
 
+export type Query =
+  | { form: "select"; distinct: boolean; vars: string[] | null; where: Group; order: { name: string; desc: boolean }[]; limit: number | null; offset: number }
+  | { form: "ask"; where: Group }
+  | { form: "construct"; template: TriplePattern[]; where: Group };
+export type SelectQuery = Extract<Query, { form: "select" }>;
+
 export type GroupElement =
   | { type: "bgp"; triples: TriplePattern[] }
   | { type: "optional"; group: Group }
   | { type: "union"; groups: Group[] }
   | { type: "values"; bindings: Record<string, Term | null>[] }
+  | { type: "subselect"; query: SelectQuery }
+  | { type: "bind"; expr: Expr; name: string }
   | { type: "filter"; expr: Expr };
 export type Group = GroupElement[];
 
 export type { TriplePattern };
-
-export type Query =
-  | { form: "select"; distinct: boolean; vars: string[] | null; where: Group; order: { name: string; desc: boolean }[]; limit: number | null; offset: number }
-  | { form: "ask"; where: Group }
-  | { form: "construct"; template: TriplePattern[]; where: Group };
 
 const RESERVED = new Set(["SELECT", "ASK", "CONSTRUCT", "WHERE", "DISTINCT", "OPTIONAL", "UNION", "FILTER", "ORDER", "BY", "ASC", "DESC", "LIMIT", "OFFSET", "PREFIX", "BASE", "REGEX", "LANG", "DATATYPE", "BOUND", "A", "VALUES", "TRUE", "FALSE", "STR"]);
 
@@ -178,7 +182,27 @@ function parseGroup(st: St): Group {
       group.push({ type: "optional", group: parseGroup(st) });
       continue;
     }
+    if (t.kind === "kw" && t.text === "BIND") {
+      next(st);
+      punct(st, "(");
+      const expr = parseExpr(st);
+      eatKw(st, "AS");
+      const v = next(st);
+      if (v.kind !== "var") throw new SparqlSyntaxError("expected variable after AS");
+      punct(st, ")");
+      group.push({ type: "bind", expr, name: v.text });
+      continue;
+    }
     if (t.kind === "punct" && t.text === "{") {
+      const follower = st.toks[st.i + 1];
+      if (follower?.kind === "kw" && follower.text === "SELECT") {
+        next(st); // consume "{"
+        next(st); // consume "SELECT" (parseSelectQuery expects it consumed)
+        const query = parseSelectQuery(st);
+        punct(st, "}");
+        group.push({ type: "subselect", query });
+        continue;
+      }
       const groups: Group[] = [parseGroup(st)];
       while (isKw(st, "UNION")) { next(st); groups.push(parseGroup(st)); }
       group.push(groups.length === 1 ? { type: "union", groups } : { type: "union", groups });
@@ -305,6 +329,26 @@ function parseSolutionModifier(st: St, q: Extract<Query, { form: "select" }>): v
   if (isKw(st, "OFFSET")) { next(st); const t = next(st); if (t.kind !== "number") throw new SparqlSyntaxError("expected number after OFFSET"); q.offset = Number(t.text); }
 }
 
+/** Parses the SELECT form (projection + WHERE + solution modifiers).
+ * The SELECT keyword is already consumed. Shared by the top-level query
+ * and in-group subqueries. */
+function parseSelectQuery(st: St): SelectQuery {
+  const distinct = isKw(st, "DISTINCT");
+  if (distinct) next(st);
+  let vars: string[] | null = null;
+  if (peek(st)?.kind === "punct" && peek(st)!.text === "*") { next(st); }
+  else {
+    vars = [];
+    while (peek(st)?.kind === "var") vars.push(next(st).text);
+    if (vars.length === 0) throw new SparqlSyntaxError("expected variables or * after SELECT");
+  }
+  if (isKw(st, "WHERE")) next(st);
+  const where = parseGroup(st);
+  const q: SelectQuery = { form: "select", distinct, vars, where, order: [], limit: null, offset: 0 };
+  parseSolutionModifier(st, q);
+  return q;
+}
+
 export function parseQuery(input: string): Query {
   const st: St = {
     toks: tokenize(input), i: 0, base: "",
@@ -345,20 +389,7 @@ export function parseQuery(input: string): Query {
   }
 
   if (form.text !== "SELECT") throw new SparqlSyntaxError(`unsupported form: ${form.text}`);
-  const distinct = isKw(st, "DISTINCT");
-  if (distinct) next(st);
-  let vars: string[] | null = null;
-  if (peek(st)?.kind === "punct" && peek(st)!.text === "*") { next(st); }
-  else {
-    vars = [];
-    while (peek(st)?.kind === "var") vars.push(next(st).text);
-    if (vars.length === 0) throw new SparqlSyntaxError("expected variables or * after SELECT");
-  }
-  if (isKw(st, "WHERE")) next(st);
-  const where = parseGroup(st);
-  const q: Query = { form: "select", distinct, vars, where, order: [], limit: null, offset: 0 };
-  parseSolutionModifier(st, q);
-  return q;
+  return parseSelectQuery(st);
 }
 
 export function parseConstructTemplate(st: St): TriplePattern[] {

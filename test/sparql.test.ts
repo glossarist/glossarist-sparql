@@ -4,7 +4,7 @@ import { QuadStore } from "../src/store.js";
 import { iri, literal, blank, type Term } from "../src/terms.js";
 import { readJsonld } from "../src/jsonld-reader.js";
 import { parseQuery } from "../src/sparql-parser.js";
-import { evaluate } from "../src/sparql-evaluator.js";
+import { evaluate, SparqlTimeoutError } from "../src/sparql-evaluator.js";
 
 const G = "https://www.glossarist.org/ontologies/";
 const SKOS = "http://www.w3.org/2004/02/skos/core#";
@@ -129,5 +129,112 @@ describe("SPARQL v0 end-to-end", () => {
     st.insert({ s: { kind: "iri", value: "x:2" }, p: { kind: "iri", value: "http://q" }, o: { kind: "literal", value: "q" } });
     const r = evaluate(st, q as never) as unknown as { bindings: { a: { value: string } }[] };
     expect(r.bindings.map((b) => b.a.value)).toEqual(["x:1"]);
+  });
+});
+
+describe("SPARQL subqueries", () => {
+  const store = makeStore();
+
+  it("subquery joins on shared variable", () => {
+    const q = parseQuery(`
+      SELECT ?c ?label WHERE {
+        ?c a gloss:Concept .
+        { SELECT ?c WHERE { ?c gloss:status "superseded" . } }
+        ?c skos:prefLabel ?label .
+      }`);
+    const r = evaluate(store, q as never) as { bindings: Record<string, Term>[] };
+    expect(r.bindings).toHaveLength(2); // superseded concept has eng + fra labels
+    for (const b of r.bindings) expect((b.c as { value: string }).value).toBe(`${CONCEPT}2`);
+  });
+
+  it("subquery is evaluated independently: ORDER BY/LIMIT inside, projected vars only", () => {
+    const q = parseQuery(`
+      SELECT ?c ?label WHERE {
+        { SELECT ?c WHERE { ?c gloss:identifier ?id . } ORDER BY DESC ?id LIMIT 1 }
+        ?c skos:prefLabel ?label .
+      }`);
+    const r = evaluate(store, q as never) as { bindings: Record<string, Term>[] };
+    expect(r.bindings).toHaveLength(1); // identifier 3.3 sorts last → one concept, one (deu) label
+    expect((r.bindings[0].c as { value: string }).value).toBe(`${CONCEPT}3`);
+  });
+
+  it("subquery without shared variables produces a cross join", () => {
+    const q = parseQuery(`
+      SELECT ?c ?tag WHERE {
+        ?c a gloss:Concept .
+        { SELECT ?tag WHERE { ?d gloss:status ?tag . } }
+      }`);
+    const r = evaluate(store, q as never) as { bindings: Record<string, Term>[] };
+    expect(r.bindings).toHaveLength(6); // 3 concepts x 2 statuses
+  });
+
+  it("subquery is projected: inner-only variables do not leak into the outer scope", () => {
+    const q = parseQuery(`
+      SELECT * WHERE {
+        { SELECT ?c WHERE { ?c gloss:status "superseded" . } }
+        ?c skos:prefLabel ?label .
+      }`);
+    const r = evaluate(store, q as never) as { vars: string[] };
+    expect(r.vars.sort()).toEqual(["c", "label"].sort());
+  });
+
+  it("subquery respects the outer deadline", async () => {
+    const q = parseQuery(`
+      SELECT ?a ?b WHERE {
+        { SELECT ?a ?b WHERE { ?a ?p1 ?x . ?b ?p2 ?x . } }
+      }`);
+    await expect(async () => evaluate(store, q as never, { deadlineMs: Date.now() - 1 })).rejects.toThrow(SparqlTimeoutError);
+  });
+});
+
+describe("SPARQL BIND", () => {
+  const store = makeStore();
+
+  it("BIND computes a variable usable in FILTER", () => {
+    const q = parseQuery(`
+      SELECT ?c WHERE {
+        ?c gloss:identifier ?id .
+        BIND (str(?id) AS ?idStr)
+        FILTER (?idStr = "3.2")
+      }`);
+    const r = evaluate(store, q as never) as { bindings: Record<string, Term>[] };
+    expect(r.bindings).toHaveLength(1);
+    expect((r.bindings[0].c as { value: string }).value).toBe(`${CONCEPT}2`);
+  });
+
+  it("BIND leaves the variable unbound on expression error", () => {
+    const q = parseQuery(`
+      SELECT ?c WHERE {
+        ?c a gloss:Concept .
+        BIND (datatype(?c) AS ?dt)
+        FILTER (!bound(?dt))
+      }`);
+    const r = evaluate(store, q as never) as { bindings: Record<string, Term>[] };
+    expect(r.bindings).toHaveLength(3); // datatype() of an IRI is a type error → ?dt unbound everywhere
+  });
+
+  it("BIND evaluates per solution", () => {
+    const q = parseQuery(`
+      SELECT ?c WHERE {
+        ?c skos:prefLabel ?label .
+        BIND (lang(?label) AS ?lang)
+        FILTER (?lang = "deu")
+      }`);
+    const r = evaluate(store, q as never) as { bindings: Record<string, Term>[] };
+    expect(r.bindings).toHaveLength(1);
+    expect((r.bindings[0].c as { value: string }).value).toBe(`${CONCEPT}3`);
+  });
+
+  it("BIND composes with OPTIONAL (unbound stays unbound)", () => {
+    const q = parseQuery(`
+      SELECT ?c WHERE {
+        ?c a gloss:Concept .
+        OPTIONAL { ?c gloss:status ?status . }
+        BIND (lang(?status) AS ?l)
+        FILTER (!bound(?l))
+      }`);
+    const r = evaluate(store, q as never) as { bindings: Record<string, Term>[] };
+    expect(r.bindings).toHaveLength(1); // plain-literal statuses bind ?l to "" (lang-exists); only statusless concept 3 has ?l unbound
+    expect((r.bindings[0].c as { value: string }).value).toBe(`${CONCEPT}3`);
   });
 });
